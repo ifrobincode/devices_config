@@ -1,0 +1,11 @@
+[project]
+name = "devices-config"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.14"
+dependencies = [
+    "jinja2>=3.1.6",
+    "netmiko>=4.7.0",
+    "openpyxl>=3.1.5",
+    "pandas>=3.0.5",
+]
