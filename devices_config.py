@@ -4,7 +4,7 @@
 """
 Author: ifrobincode
 Created: 2026-09-12
-Version: v1.0
+Version: v7.0
 Updated: 2026-09-14
 Description:
     基于 Excel + Jinja2 模板的网络设备批量配置工具。
@@ -63,6 +63,8 @@ from netmiko.exceptions import (
     NetmikoTimeoutException,
 # 【逐行说明】结束 Netmiko 异常类型导入。
 )
+# 【修改说明】导入 Paramiko 的 SSHException，用于单独识别 SSH 协议握手阶段的异常。
+from paramiko.ssh_exception import SSHException
 
 # 【逐行说明】原脚本注释用于说明代码结构或设计意图。
 # ============================================================================
@@ -111,6 +113,8 @@ SHEET1_FIELD_RULES: dict[str, bool] = {
     "secret": False,
 # 【逐行说明】device_type 决定 Netmiko 使用哪个设备平台驱动，因此不能为空。
     "device_type": True,
+# 【修改说明】port 决定 Netmiko 实际连接设备使用的 TCP 端口，因此不能为空。
+    "port": True,
 # 【逐行说明】结束 Sheet1 字段规则字典。
 }
 
@@ -235,46 +239,71 @@ class ValidationContext:
 # ============================================================================
 
 
+# 【修改说明】定义支持原样输出标题的日志格式化器，使标题不带日期、时间和日志级别前缀。
+class LogFormatter(logging.Formatter):
+    """根据日志记录的 raw 标记决定是否省略标准日志前缀。"""
+
+    # 【修改说明】重写日志格式化方法，仅对明确标记为 raw 的标题记录取消统一前缀。
+    def format(self, record: logging.LogRecord) -> str:
+        # 【修改说明】检查当前日志记录是否要求原样输出。
+        if getattr(record, "raw", False):
+            # 【修改说明】直接返回日志消息正文，使标题保持用户指定的纯文本格式。
+            return record.getMessage()
+        # 【修改说明】其他普通日志继续使用日期、时间和日志级别前缀。
+        return super().format(record)
+
+
 # 【逐行说明】定义日志初始化函数，并声明返回 logging.Logger。
-def setup_logger(log_file: Path | None = None) -> logging.Logger:
+def setup_logger(
+    log_file: Path | None = None,
+    console_output: bool = True,
+) -> logging.Logger:
     """创建控制台日志，并按需增加文件日志。"""
-# 【修改说明】允许调用方不创建文件日志，使 PRE-CHECK 无 ERROR 时不会产生空日志文件。
+# 【修改说明】允许调用方控制是否输出到 CMD，使 PRE-CHECK 日志落盘时不会重复显示已经输出过的问题。
     logger = logging.getLogger("devices_config")
-# 【修改说明】保留 INFO 级别，确保 WARNING 和 ERROR 等异常信息也能进入日志。
+# 【修改说明】保留 INFO 级别，使 INFO、WARNING 和 ERROR 都可以按日志处理流程输出。
     logger.setLevel(logging.INFO)
-# 【修改说明】在切换 PRE-CHECK 与 Deployment 日志文件前先关闭旧 Handler，避免 Windows 下文件句柄持续占用。
+# 【修改说明】切换日志输出目标前关闭已有 Handler，避免 Windows 下旧日志文件保持打开状态。
     for handler in logger.handlers:
-        # 【修改说明】关闭旧文件 Handler，确保前一阶段的日志文件已经释放。
+        # 【修改说明】释放已有 Handler 占用的文件或控制台资源。
         handler.close()
-    # 【修改说明】清理旧 Handler，避免 PRE-CHECK 与 Deployment 日志重复输出。
+    # 【修改说明】清除旧 Handler，避免同一条日志同时写入旧阶段日志文件。
     logger.handlers.clear()
 
-# 【修改说明】统一定义日志输出格式，终端日志和文件日志保持一致。
-    formatter = logging.Formatter(
+# 【修改说明】统一定义日志时间、级别和消息格式，保持 CMD 与日志文件的基本格式一致。
+    # 【修改说明】使用自定义格式化器，使普通日志保留时间和级别，而标题日志可以原样输出。
+    formatter = LogFormatter(
         "%(asctime)s [%(levelname)s] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-# 【修改说明】始终保留控制台 Handler，让 PRE-CHECK 阶段仍能实时显示检查结果。
-    console_handler = logging.StreamHandler(sys.stdout)
-# 【修改说明】为控制台 Handler 应用统一日志格式。
-    console_handler.setFormatter(formatter)
-# 【修改说明】将控制台 Handler 加入 Logger。
-    logger.addHandler(console_handler)
+    # 【修改说明】关闭 Paramiko 的底层错误日志输出，避免已由业务层捕获处理的 SSHException 再打印完整 traceback。
+    logging.getLogger("paramiko").setLevel(logging.CRITICAL)
+    # 【修改说明】进一步限制 Paramiko Transport 子日志，确保 SSH banner 异常不会绕过主程序日志格式输出到 CMD。
+    logging.getLogger("paramiko.transport").setLevel(logging.CRITICAL)
 
-# 【修改说明】只有明确传入日志文件路径时才创建 FileHandler，从根源上避免产生空日志文件。
+# 【修改说明】仅在调用方要求 CMD 输出时创建控制台 Handler。
+    if console_output:
+        # 【修改说明】将日志发送到标准输出，使用户可以实时看到设备执行结果。
+        console_handler = logging.StreamHandler(sys.stdout)
+        # 【修改说明】为控制台 Handler 应用统一日志格式。
+        console_handler.setFormatter(formatter)
+        # 【修改说明】将控制台 Handler 注册到 Logger。
+        logger.addHandler(console_handler)
+
+# 【修改说明】只有传入文件路径时才创建 FileHandler，从而继续支持日志文件的惰性创建。
     if log_file is not None:
-# 【修改说明】使用 UTF-8 创建当前阶段的文件日志，并保证中文日志正常保存。
+        # 【修改说明】使用 UTF-8 打开阶段日志文件，确保中文日志可以正常保存。
         file_handler = logging.FileHandler(
             log_file,
             encoding="utf-8",
         )
-# 【修改说明】为文件 Handler 应用统一日志格式。
+        # 【修改说明】为文件 Handler 应用与 CMD 相同的日志格式。
         file_handler.setFormatter(formatter)
-# 【修改说明】将文件 Handler 加入 Logger，使调用方指定的阶段日志写入对应文件。
+        # 【修改说明】将文件 Handler 注册到 Logger，使指定日志写入文件。
         logger.addHandler(file_handler)
 
-# 【修改说明】返回配置完成的 Logger，供 PRE-CHECK 和 Deploy 阶段使用。
+# 【修改说明】返回当前阶段已经配置完成的 Logger。
     return logger
 
 
@@ -946,11 +975,14 @@ def render_devices(
             )
             continue
 
+        # 【修改说明】将 Excel 中的设备管理地址映射到 Netmiko 的 host 参数，避免把设备名称误当成连接地址。
         connection_params = {
             "device_type": connection_row["device_type"],
             "host": connection_row["ip"],
             "username": connection_row["username"],
             "password": connection_row["password"],
+# 【修改说明】将 Excel 中明确配置的 SSH/Telnet TCP 端口传递给 Netmiko，支持设备使用非默认端口。
+            "port": int(connection_row["port"]),
         }
 
         secret = connection_row.get("secret", "")
@@ -1137,16 +1169,13 @@ def write_precheck_log(
     if not issues_to_log:
         return
 
-# 【修改说明】为存在异常级别日志的 PRE-CHECK 创建独立文件 Logger。
-    precheck_logger = setup_logger(execution_dir / "precheck.log")
-# 【修改说明】记录 PRE-CHECK 日志标题，方便用户识别该文件的用途。
-    precheck_logger.info("================================")
-# 【修改说明】标记日志所属阶段。
-    precheck_logger.info("PRE-CHECK")
-# 【修改说明】结束 PRE-CHECK 标题区域。
-    precheck_logger.info("================================")
+# 【修改说明】创建只写入文件的 PRE-CHECK Logger，避免已经在 CMD 显示过的问题再次打印到终端。
+    precheck_logger = setup_logger(
+        execution_dir / "precheck.log",
+        console_output=False,
+    )
 
-# 【修改说明】按原始检查顺序重新写入所有 ERROR/WARNING，确保文件日志与 CMD 中显示的问题一致。
+# 【修改说明】按原始检查顺序重新写入所有 ERROR/WARNING，确保日志文件完整保留异常和告警信息。
     for issue in issues_to_log:
 # 【修改说明】根据 ValidationIssue 的级别写入对应的 logging 级别。
         precheck_logger.log(
@@ -1354,7 +1383,33 @@ def deploy_one_device(
         return DeploymentResult(
             host=device.host,
             status="FAILED",
-            message=f"认证失败：{exc}",
+            message=(
+                "认证失败：用户名或密码错误的可能性最高。\n"
+                "可能原因：SSH 密钥、AAA 策略、账号状态或认证方式导致设备拒绝登录。\n"
+                f"Netmiko 原始信息：{exc}"
+            ),
+            config_file=str(config_file),
+        )
+
+    except SSHException as exc:
+        if "Error reading SSH protocol banner" in str(exc):
+            return DeploymentResult(
+                host=device.host,
+                status="FAILED",
+                message=(
+                    "SSH 协议握手失败：无法读取 SSH protocol banner。\n"
+                    "可能原因：IP 或端口对应的服务不是 SSH、SSH 服务未正常监听。\n"
+                    "也可能是防火墙或 ACL 允许 TCP 建连但阻断后续 SSH 握手，"
+                    "或者设备响应过慢。\n"
+                    "请重点检查 Excel 中的 ip 和 port，并确认该端口确实提供 SSH 服务。\n"
+                    f"Paramiko 原始信息：{exc}"
+                ),
+                config_file=str(config_file),
+            )
+        return DeploymentResult(
+            host=device.host,
+            status="FAILED",
+            message=f"SSH 连接失败：{exc}",
             config_file=str(config_file),
         )
 
@@ -1362,7 +1417,11 @@ def deploy_one_device(
         return DeploymentResult(
             host=device.host,
             status="FAILED",
-            message=f"连接超时：{exc}",
+            message=(
+                "连接超时：可能是 IP 地址不可达、TCP 端口不可达、"
+                "防火墙/ACL 丢弃连接，或者设备响应超时。"
+                f" Netmiko 原始信息：{exc}"
+            ),
             config_file=str(config_file),
         )
 
@@ -1455,42 +1514,32 @@ def deploy_devices(
 # 【逐行说明】将当前设备结果加入最终结果列表。
             results.append(result)
 
-# 【逐行说明】SUCCESS 使用 INFO 级别记录。
+# 【修改说明】根据设备最终状态选择对应的 logging 级别，使 SUCCESS、PARTIAL_SUCCESS 和 FAILED 在 CMD 与文件中有一致的严重程度。
             if result.status == "SUCCESS":
-# 【逐行说明】写入 INFO 日志。
-                logger.info(
-# 【逐行说明】输出状态。
-                    "[%s] %s",
-# 【逐行说明】输出结果消息。
-                    result.status,
-# 【逐行说明】当前代码行执行本步骤的具体操作。
-                    result.message,
-# 【逐行说明】当前代码行执行本步骤的具体操作。
-                )
-# 【逐行说明】PARTIAL_SUCCESS 使用 WARNING 级别记录。
+                # 【修改说明】成功结果使用 INFO 级别记录，因为设备已经完成配置并保存。
+                log_level = logging.INFO
             elif result.status == "PARTIAL_SUCCESS":
-# 【逐行说明】写入 WARNING 日志。
-                logger.warning(
-# 【逐行说明】当前代码行执行本步骤的具体操作。
-                    "[%s] %s",
-# 【逐行说明】当前代码行执行本步骤的具体操作。
-                    result.status,
-# 【逐行说明】当前代码行执行本步骤的具体操作。
-                    result.message,
-# 【逐行说明】当前代码行执行本步骤的具体操作。
-                )
-# 【逐行说明】其他状态使用 ERROR 级别记录。
+                # 【修改说明】部分成功使用 WARNING 级别记录，因为配置已经执行但后续保存等步骤存在问题。
+                log_level = logging.WARNING
             else:
-# 【逐行说明】写入 ERROR 日志。
-                logger.error(
-# 【逐行说明】当前代码行执行本步骤的具体操作。
-                    "[%s] %s",
-# 【逐行说明】当前代码行执行本步骤的具体操作。
-                    result.status,
-# 【逐行说明】当前代码行执行本步骤的具体操作。
-                    result.message,
-# 【逐行说明】当前代码行执行本步骤的具体操作。
-                )
+                # 【修改说明】失败结果使用 ERROR 级别记录，方便用户通过日志级别快速定位失败设备。
+                log_level = logging.ERROR
+
+            # 【修改说明】将单台设备的标题、状态和完整异常信息作为一次日志记录输出，避免多线程执行时不同设备的错误信息互相穿插。
+            # 【修改说明】在每台设备标题前增加两个空行，并使用 raw 日志记录，使设备标题不显示日期、时间和日志级别。
+            logger.log(
+                log_level,
+                "\n\n========== 设备：%s ==========",
+                result.host,
+                extra={"raw": True},
+            )
+            # 【修改说明】使用普通日志记录设备执行结果，使状态、时间和日志级别仍然保留在详细执行记录中。
+            logger.log(
+                log_level,
+                "[%s] %s",
+                result.status,
+                result.message,
+            )
 
 # 【逐行说明】按设备 host 排序后返回结果，使最终输出顺序稳定。
     return sorted(results, key=lambda item: item.host)
@@ -1518,31 +1567,26 @@ def log_deployment_summary(
         for result in results
     )
 
-    # 【修改说明】写入清晰的 Summary 分隔线，便于在详细 deployment.log 中快速定位最终结果。
-    logger.info("================================")
-    # 【修改说明】标记以下日志内容为本次 Deploy 的最终汇总。
-    logger.info("Deployment Summary")
-    # 【修改说明】结束 Summary 标题区域。
-    logger.info("================================")
+    # 【修改说明】在 Summary 标题前增加两个空行，并使用 raw 日志记录，使标题保持纯文本显示。
+    logger.info("\n\n========== Deployment Summary ==========", extra={"raw": True})
     # 【修改说明】记录 SUCCESS 数量。
     logger.info("SUCCESS         : %s", success_count)
     # 【修改说明】记录 PARTIAL_SUCCESS 数量。
     logger.info("PARTIAL_SUCCESS : %s", partial_count)
     # 【修改说明】记录 FAILED 数量。
     logger.info("FAILED          : %s", failed_count)
-    # 【修改说明】增加空白分隔，使 Summary 与设备明细更容易阅读。
+    # 【修改说明】增加空白分隔，使最终统计区域与前面的设备执行日志明显区分。
     logger.info("")
-    # 【修改说明】标记设备级执行结果明细开始。
-    logger.info("Details:")
+    # 【修改说明】标记设备最终状态统计开始，避免在 Summary 中重复输出完整异常堆栈。
+    logger.info("Device Results")
 
-    # 【修改说明】按照 host 排序输出设备级最终结果，使日志中的顺序稳定可读。
+    # 【修改说明】按照 host 排序输出设备最终状态，使 Summary 中的设备顺序稳定。
     for result in results:
-        # 【修改说明】将设备 host、最终状态和说明写入 deployment.log。
+        # 【修改说明】只记录 host 和最终状态，让 Summary 保持简洁，详细错误已经在前面的设备日志块中记录。
         logger.info(
-            "%s | %-18s | %s",
+            "%s | %s",
             result.host,
             result.status,
-            result.message,
         )
 
 def main() -> None:
@@ -1653,16 +1697,10 @@ def main() -> None:
         # 【修改说明】结束 Deploy 标题分隔线。
         print("=" * 72)
 
-        # 【修改说明】关闭 PRE-CHECK 文件 Handler 并切换到 deployment.log，确保两阶段分别写入各自日志文件。
+        # 【修改说明】创建 Deployment 专用日志文件，并恢复 CMD 输出，使设备执行结果可以实时显示并同时保存。
         deployment_logger = setup_logger(execution_dir / "deployment.log")
-        # 【修改说明】将主流程当前使用的 Logger 切换为 Deployment Logger，确保后续异常记录到 deployment.log。
+        # 【修改说明】将主流程当前使用的 Logger 切换为 Deployment Logger，使后续 Deploy 异常写入 deployment.log。
         logger = deployment_logger
-        # 【修改说明】记录 Deploy 阶段开始标记，便于快速定位 deployment.log 的执行区间。
-        deployment_logger.info("================================")
-        # 【修改说明】标记日志中的 Deployment 执行阶段。
-        deployment_logger.info("Deployment")
-        # 【修改说明】结束 Deployment 标题区域。
-        deployment_logger.info("================================")
 
         # 【修改说明】启动多设备并发配置下发。
         results = deploy_devices(
