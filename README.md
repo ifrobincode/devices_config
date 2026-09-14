@@ -33,4 +33,4 @@ devices_config 脚本用于对同类型网络设备批量下发配置使用。
 
 # 更新日志
 
-详见[UPDATE.md](https://github.com/icefire-ken/devices_config/blob/main/UPDATE.md)。
+详见[UPDATE.md](https://github.com/ifrobincode/devices_config/blob/main/UPDATE.md)。
