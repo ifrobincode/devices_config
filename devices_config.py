@@ -4,8 +4,8 @@
 """
 Author: ifrobincode
 Created: 2026-09-12
-Version: v7.0
-Updated: 2026-09-14
+Version: v8.0
+Updated: 2026-09-18
 Description:
     基于 Excel + Jinja2 模板的网络设备批量配置工具。
     支持 Preview 和 Deploy 两种运行模式。
@@ -13,7 +13,7 @@ Description:
 Usage:
     1. 将本脚本、devices_info.xlsx、config_template.txt 放在同一目录。
     2. 运行：
-           python devices_config.py
+           python devices_config_v8.py
     3. 根据提示输入 Excel 和模板文件名。
        文件扩展名可省略，程序会自动补全。
     4. 选择 Preview 或 Deploy。
@@ -73,8 +73,14 @@ from paramiko.ssh_exception import SSHException
 # 【逐行说明】原脚本注释用于说明代码结构或设计意图。
 # ============================================================================
 
-# 【逐行说明】获取当前 Python 脚本所在目录，后续所有相对文件都以此目录为基准。
-SCRIPT_DIR = Path(__file__).resolve().parent
+# 【修改说明】根据程序运行方式确定文件基准目录，确保普通 Python 和 PyInstaller EXE 都从正确位置读取外部文件。
+# 【修改说明】判断程序是否运行在 PyInstaller 打包后的 EXE 环境中，以便正确确定用户实际放置 EXE 的目录。
+if getattr(sys, "frozen", False):
+    # 【修改说明】EXE 模式下使用 sys.executable 获取实际启动的 EXE 路径，避免 __file__ 指向 PyInstaller 的 _MEI 临时目录。
+    SCRIPT_DIR = Path(sys.executable).resolve().parent
+else:
+    # 【修改说明】普通 Python 脚本模式下继续使用源代码文件所在目录作为程序工作目录。
+    SCRIPT_DIR = Path(__file__).resolve().parent
 # 【逐行说明】定义 Excel 默认文件名。
 DEFAULT_EXCEL_NAME = "devices_info.xlsx"
 # 【逐行说明】定义 Jinja2 配置模板默认文件名。
